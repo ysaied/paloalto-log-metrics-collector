@@ -17,7 +17,7 @@ csv_file = "fw_logcounters.csv"
 with open(csv_file, "a", newline="") as f:
     writer = csv.writer(f)
     if f.tell() == 0:
-        writer.writerow(["fw_ip", "hostname", "model", "sn", "panorama_ip", "timestamp", "datetime", "last-second", "last-minute", "last-hour", "last-day", "last-week", "incoming_log-rate", "raw_log-rate", "written_log-rate", "config-size_KB", "sec-rules"])
+        writer.writerow(["fw_ip", "hostname", "model", "sn", "panos", "panorama_ip", "timestamp", "datetime", "last-second", "last-minute", "last-hour", "last-day", "last-week", "incoming_log-rate", "raw_log-rate", "written_log-rate", "config-size_KB", "sec-rules", "HA", "status"])
 
 # --- Function to fetch log counters ---
 def get_log_counters(host, username, password):
@@ -54,23 +54,26 @@ def get_log_counters(host, username, password):
         while chan.recv_ready():
             stats_output += chan.recv(65535).decode()
 
-        # Get hostname, model and serial number
-        print(f"[DEBUG] Sending third command to {host} for hostname, model and serial")
-        chan.send("show system info | match \"hostname\\|serial\\|model\"\n")
+        # Get hostname, model, serial number, and panos version
+        print(f"[DEBUG] Sending third command to {host} for hostname, model, serial, and sw-version")
+        chan.send("show system info | match \"hostname\\|serial\\|model\\|sw-version\"\n")
         time.sleep(2)
         sysinfo_output = ""
         while chan.recv_ready():
             sysinfo_output += chan.recv(65535).decode()
-        hostname = sn = model = ""
+        hostname = sn = model = panos = ""
         h_match = re.search(r"hostname:\s+(\S+)", sysinfo_output)
         s_match = re.search(r"serial:\s+(\S+)", sysinfo_output)
         m_match = re.search(r"model:\s+(\S+)", sysinfo_output)
+        p_match = re.search(r"sw-version:\s+(\S+)", sysinfo_output)
         if h_match:
             hostname = h_match.group(1)
         if s_match:
             sn = s_match.group(1)
         if m_match:
             model = m_match.group(1)
+        if p_match:
+            panos = p_match.group(1)
 
         print(f"[DEBUG] Sending fourth command to {host} for panorama status")
         chan.send("show panorama-status | match \"Panorama Server 1\"\n")
@@ -116,6 +119,17 @@ def get_log_counters(host, username, password):
         if r_match:
             raw_log_rate = r_match.group(1)
 
+        print(f"[DEBUG] Sending eighth command to {host} for HA state")
+        chan.send('show high-availability state | match "Mode"\n')
+        time.sleep(2)
+        ha_output = ""
+        while chan.recv_ready():
+            ha_output += chan.recv(65535).decode()
+        if "Active" in ha_output or "Passive" in ha_output:
+            ha_state = "True"
+        else:
+            ha_state = "False"
+
         chan.close()
         ssh.close()
 
@@ -133,7 +147,7 @@ def get_log_counters(host, username, password):
                         incoming_rate = value
                     elif "written" in name:
                         written_rate = value
-                return parts, incoming_rate, raw_log_rate, written_rate, hostname, model, sn, panorama_ip, config_kb, sec_rules
+                return parts, incoming_rate, raw_log_rate, written_rate, hostname, model, sn, panos, panorama_ip, config_kb, sec_rules, ha_state, "success"
             else:
                 print(f"[WARN] {host}: incoming logs did not have 5 fields: {parts}")
                 # Return empty counters if fields are not 5
@@ -144,7 +158,7 @@ def get_log_counters(host, username, password):
                         incoming_rate = value
                     elif "written" in name:
                         written_rate = value
-                return ["", "", "", "", ""], incoming_rate, raw_log_rate, written_rate, hostname, model, sn, panorama_ip, config_kb, sec_rules
+                return ["", "", "", "", ""], incoming_rate, raw_log_rate, written_rate, hostname, model, sn, panos, panorama_ip, config_kb, sec_rules, ha_state, "partial"
         else:
             print(f"[WARN] {host}: 'incoming logs' pattern not found in output")
             rate_match = re.findall(r"(Log (?:incoming|written) rate):\s+(\d+)/sec", stats_output)
@@ -154,18 +168,20 @@ def get_log_counters(host, username, password):
                     incoming_rate = value
                 elif "written" in name:
                     written_rate = value
-            return ["", "", "", "", ""], incoming_rate, raw_log_rate, written_rate, hostname, model, sn, panorama_ip, config_kb, sec_rules
+            return ["", "", "", "", ""], incoming_rate, raw_log_rate, written_rate, hostname, model, sn, panos, panorama_ip, config_kb, sec_rules, ha_state, "partial"
     except Exception as e:
         print(f"[ERROR] {host}: {e}")
-        return ["", "", "", "", ""], "0", "0", "0", "", "", "", "", "", ""
+        return ["", "", "", "", ""], "0", "0", "0", "", "", "", "", "", "", "", f"error: {e}"
 
 def process_firewall(host, username, password):
     print(f"[DEBUG] Processing host: {host}")
     result = get_log_counters(host, username, password)
     if result:
-        counters, incoming_rate, raw_log_rate, written_rate, hostname, model, sn, panorama_ip, config_kb, sec_rules = result
+        counters, incoming_rate, raw_log_rate, written_rate, hostname, model, sn, panos, panorama_ip, config_kb, sec_rules, ha_state, status = result
         if not counters or len(counters) != 5:
             counters = ["", "", "", "", ""]
+            if status == "success":
+                status = "partial"
     else:
         counters = ["", "", "", "", ""]
         incoming_rate = "0"
@@ -174,15 +190,18 @@ def process_firewall(host, username, password):
         hostname = ""
         model = ""
         sn = ""
+        panos = ""
         panorama_ip = ""
         config_kb = ""
         sec_rules = ""
+        ha_state = ""
+        status = "failed"
     epoch = int(datetime.now().timestamp())
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[DEBUG] Writing results to CSV for {host}")
     with open(csv_file, "a", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([host, hostname, model, sn, panorama_ip, epoch, now] + counters + [incoming_rate, raw_log_rate, written_rate, config_kb, sec_rules])
+        writer.writerow([host, hostname, model, sn, panos, panorama_ip, epoch, now] + counters + [incoming_rate, raw_log_rate, written_rate, config_kb, sec_rules, ha_state, status])
     if any(counters):
         print(f"[OK] {host}: {counters} incoming_log-rate: {incoming_rate} raw_log-rate: {raw_log_rate} written_log-rate: {written_rate}")
     else:
