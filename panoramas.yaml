@@ -1,0 +1,13 @@
+groups:
+  group1:
+    username: admin
+    password: password123
+    hosts:
+      - 192.168.2.18
+      - 192.168.2.35
+  group2:
+    username: another_admin
+    password: secret456
+    hosts:
+      - 10.10.10.1
+      - 10.10.10.2
