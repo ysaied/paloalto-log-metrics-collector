@@ -1,7 +1,13 @@
+#!/usr/bin/env python3
+# pip install xmltodict
+# sudo apt update
+# sudo apt install -y python3-xmltodict
+
 import time
 import requests
 import xmltodict
 import logging
+import xml.dom.minidom
 
 # Disable insecure request warnings from urllib3 (since we're likely using self-signed certs on Panorama)
 requests.packages.urllib3.disable_warnings()
@@ -241,4 +247,25 @@ def pan_config_snapshot(fw_ip, fw_key, filename):
         return result.get("result", {})
     except Exception as e:
         logging.error("Failed to save configuration snapshot to '%s': %s", filename, e)
+        raise
+
+
+def panos_export_cfg(fw_ip, fw_key):
+    """
+    Retrieve and save the local configuration file on the PAN-OS device as XML content.
+    Returns the pretty-printed XML content bytes.
+    """
+    url = f"https://{fw_ip}/api"
+    params = {"key": fw_key, "type": "export", "category": "configuration"}
+    try:
+        response = requests.get(url, params=params, verify=False, timeout=10)
+        response.raise_for_status()
+        # Parse and pretty-print XML content
+        dom = xml.dom.minidom.parseString(response.content)
+        pretty_xml_as_str = dom.toprettyxml(indent="  ")
+        lines = pretty_xml_as_str.splitlines()
+        logging.debug("Configuration export succeeded on %s, pretty-printed lines: %d", fw_ip, len(lines))
+        return pretty_xml_as_str.encode('utf-8')
+    except Exception as e:
+        logging.error("Export configuration failed on %s: %s", fw_ip, e)
         raise

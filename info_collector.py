@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # pip install PyYAML pysnmp==4.4.12 pyasn1==0.4.8 pyasn1-modules==0.2.8 pyasyncore
-
+# sudo apt update
+# sudo apt install -y python3-yaml python3-pysnmp4 python3-pyasn1 python3-pyasn1-modules python3-pyasyncore
 
 import logging
-from panos_actions import panos_op_cmd
+from panos_actions import panos_op_cmd,panos_export_cfg
 import requests
 import yaml
 import csv
@@ -27,15 +28,15 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
+# === CONFIGURATION VARIABLES ===
+SNMP_COMMUNITY = "ysaied"  # SNMP community string
+EXPORT_CONFIG_ENABLED = False  # Toggle configuration export for firewalls
 
 # Default list of YAML files to load, now as dict by group type
 INPUT_FILES = {
     "firewalls": ["firewalls_apikey.yaml"],
     "panoramas": ["panoramas_apikey.yaml"]
 }
-
-# SNMP community string
-SNMP_COMMUNITY = "public"
 
 def snmp_pull_firewall(host, community):
     # Firewall-specific SNMP OIDs
@@ -252,6 +253,35 @@ def process_host(host, api_key, group_type):
                                     fw_lc_count = len(pl['serial_number'])
                                 else:
                                     fw_lc_count = 1
+
+        # --- EXPORT CONFIGURATION LOGIC FOR FIREWALLS ---
+        # Export configuration after all API calls for firewalls
+        if EXPORT_CONFIG_ENABLED and group_type == "firewalls":
+            try:
+                xml_content = panos_export_cfg(host, api_key)
+                # Get sysinfo for nodename (fall back to host if needed)
+                try:
+                    sysinfo = sysinfo_result.get('result', {}).get('system', {}) if isinstance(sysinfo_result, dict) else {}
+                except Exception:
+                    sysinfo = {}
+                nodename = sysinfo.get('hostname', host)
+                # Current date/time in YYYYMMDD_HHMM
+                dt_str = datetime.now().strftime("%Y%m%d_%H%M")
+                filename = f"{nodename}_{dt_str}_cfg.xml"
+                # Save to 'config' subdirectory under script directory
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                config_dir = os.path.join(script_dir, "config")
+                if not os.path.exists(config_dir):
+                    os.makedirs(config_dir)
+                filepath = os.path.join(config_dir, filename)
+                if xml_content:
+                    with open(filepath, "wb") as f:
+                        f.write(xml_content)
+                    logging.info(f"Config exported for {nodename} ({host}) to {filepath}")
+                else:
+                    logging.error(f"Failed to export config for {nodename} ({host}) - no content returned")
+            except Exception as e:
+                logging.error(f"Error exporting config for {host}: {e}")
     else:
         resource_limit_result = None
         logging_status_result = None
